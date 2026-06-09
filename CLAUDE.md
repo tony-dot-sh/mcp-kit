@@ -77,15 +77,15 @@ This server uses Kit.com API v4. Documentation: https://developers.kit.com/
 | Category | Tool Count | Description |
 |----------|------------|-------------|
 | Account | 1 | Account information |
-| Subscribers | 7 | CRUD + tag management |
+| Subscribers | 11 | CRUD, tag management, email lookup, stats, engagement filter, unsubscribe |
 | Tags | 6 | CRUD + subscriber listing |
 | Sequences | 3 | List, get, add subscribers |
-| Broadcasts | 5 | Full CRUD |
+| Broadcasts | 8 | Full CRUD + stats, list stats, link clicks |
 | Forms | 3 | List, get, add subscribers |
 | Custom Fields | 1 | List fields |
 | Webhooks | 3 | CRUD |
 
-**Total: 29 tools**
+**Total: 36 tools**
 
 ## Testing
 

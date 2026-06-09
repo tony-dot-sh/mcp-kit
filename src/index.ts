@@ -70,14 +70,22 @@ server.tool(
   "kit_list_subscribers",
   "List subscribers from Kit.com with optional filters. Returns paginated results.",
   {
-    status: z.enum(["active", "inactive", "bounced", "complained", "cancelled"]).optional()
-      .describe("Filter by subscriber status"),
-    created_after: z.string().optional().describe("Filter subscribers created after this ISO date"),
-    created_before: z.string().optional().describe("Filter subscribers created before this ISO date"),
+    status: z.enum(["active", "inactive", "bounced", "complained", "cancelled", "all"]).optional()
+      .describe("Filter by subscriber status. Defaults to 'active'."),
+    email_address: z.string().optional()
+      .describe("Filter by email address. Accepts a single email or comma-separated list for multi-lookup (e.g. 'a@example.com,b@example.com')."),
+    created_after: z.string().optional().describe("Filter subscribers created after this date (YYYY-MM-DD or ISO datetime)"),
+    created_before: z.string().optional().describe("Filter subscribers created before this date (YYYY-MM-DD or ISO datetime)"),
+    updated_after: z.string().optional().describe("Filter subscribers updated after this date"),
+    updated_before: z.string().optional().describe("Filter subscribers updated before this date"),
     sort_field: z.enum(["created_at", "updated_at"]).optional().describe("Field to sort by"),
     sort_order: z.enum(["asc", "desc"]).optional().describe("Sort order"),
-    per_page: z.number().optional().describe("Number of results per page (max 100)"),
-    after: z.string().optional().describe("Cursor for pagination - get results after this cursor"),
+    include: z.string().optional()
+      .describe("Comma-separated extra fields to include: attribution, tags, location, canceled_at"),
+    slim: z.boolean().optional()
+      .describe("When true, omits expensive fields for a faster smaller response"),
+    per_page: z.number().optional().describe("Number of results per page (max 1000)"),
+    after: z.string().optional().describe("Cursor for pagination"),
   },
   async (params) => {
     try {
@@ -187,6 +195,96 @@ server.tool(
     try {
       await client.removeTagFromSubscriber(subscriber_id, tag_id);
       return formatResponse({ success: true, message: "Tag removed from subscriber" });
+    } catch (error) {
+      return formatError(error);
+    }
+  }
+);
+
+server.tool(
+  "kit_get_subscriber_by_email",
+  "Look up a Kit subscriber by their email address. Returns subscriber ID, state, name, and custom fields. Use this when you have an email from another system (e.g. Follow Up Boss) and need the Kit subscriber record.",
+  {
+    email: z.string().email().describe("The subscriber's email address"),
+  },
+  async ({ email }) => {
+    try {
+      const result = await client.getSubscriberByEmail(email);
+      const subscribers = result?.subscribers ?? [];
+      if (subscribers.length === 0) {
+        return formatResponse({ found: false, message: `No Kit subscriber found for ${email}` });
+      }
+      return formatResponse({ found: true, subscriber: subscribers[0] });
+    } catch (error) {
+      return formatError(error);
+    }
+  }
+);
+
+server.tool(
+  "kit_get_subscriber_stats",
+  "Get email engagement stats for a subscriber: sends, opens, clicks, bounce, open rate, click rate, last activity dates, and sends since last open/click. Data available from June 2025 onward. Optionally filter to a date range.",
+  {
+    subscriber_id: z.string().describe("The subscriber ID"),
+    email_sent_after: z.string().optional()
+      .describe("Only include stats for emails sent after this date (YYYY-MM-DD)"),
+    email_sent_before: z.string().optional()
+      .describe("Only include stats for emails sent before this date (YYYY-MM-DD)"),
+  },
+  async ({ subscriber_id, email_sent_after, email_sent_before }) => {
+    try {
+      const result = await client.getSubscriberStats(subscriber_id, {
+        email_sent_after,
+        email_sent_before,
+      });
+      return formatResponse(result);
+    } catch (error) {
+      return formatError(error);
+    }
+  }
+);
+
+server.tool(
+  "kit_unsubscribe_subscriber",
+  "Unsubscribe a subscriber from Kit (sets their state to cancelled).",
+  {
+    subscriber_id: z.string().describe("The subscriber ID to unsubscribe"),
+  },
+  async ({ subscriber_id }) => {
+    try {
+      const result = await client.unsubscribeSubscriber(subscriber_id);
+      return formatResponse(result);
+    } catch (error) {
+      return formatError(error);
+    }
+  }
+);
+
+server.tool(
+  "kit_filter_subscribers_by_engagement",
+  "Filter subscribers using AND logic across engagement conditions. Condition types: opens, clicks, sent, delivered, subscribed, tags. Each condition can have count thresholds (count_greater_than, count_less_than) and date ranges (after, before as YYYY-MM-DD). Clicks and opens can further filter by specific broadcast IDs or URLs using the 'any' array. Tags conditions use 'any' with {type:'ids', matching:[id1,id2]}. Example: find subscribers who opened more than 3 times in the last 90 days.",
+  {
+    conditions: z.array(z.object({
+      type: z.enum(["opens", "clicks", "sent", "delivered", "subscribed", "tags"])
+        .describe("Type of engagement event to filter on"),
+      count_greater_than: z.number().optional().describe("Minimum event count (exclusive)"),
+      count_less_than: z.number().optional().describe("Maximum event count (exclusive)"),
+      after: z.string().optional().describe("Start date YYYY-MM-DD"),
+      before: z.string().optional().describe("End date YYYY-MM-DD"),
+      any: z.array(z.any()).optional()
+        .describe("OR sub-conditions: [{type:'broadcasts',ids:[1,2]}, {type:'urls',urls:['example.com'],matching:'contains'}, {type:'ids',matching:[tagId1]}]"),
+    })).describe("ALL of these conditions must be met (AND logic)"),
+    per_page: z.number().optional().describe("Results per page"),
+    after: z.string().optional().describe("Pagination cursor"),
+  },
+  async ({ conditions, per_page, after }) => {
+    try {
+      const result = await client.filterSubscribersByEngagement({
+        all: conditions,
+        per_page,
+        after,
+      });
+      return formatResponse(result);
     } catch (error) {
       return formatError(error);
     }
@@ -435,6 +533,63 @@ server.tool(
     try {
       await client.deleteBroadcast(broadcast_id);
       return formatResponse({ success: true, message: "Broadcast deleted" });
+    } catch (error) {
+      return formatError(error);
+    }
+  }
+);
+
+server.tool(
+  "kit_get_broadcast_stats",
+  "Get performance stats for a single broadcast: recipients, open rate, emails opened, click rate, unsubscribes, total clicks, send status, and tracking settings.",
+  {
+    broadcast_id: z.string().describe("The broadcast ID"),
+  },
+  async ({ broadcast_id }) => {
+    try {
+      const result = await client.getBroadcastStats(broadcast_id);
+      return formatResponse(result);
+    } catch (error) {
+      return formatError(error);
+    }
+  }
+);
+
+server.tool(
+  "kit_list_broadcast_stats",
+  "Get stats for all broadcasts including subject and send date on each row — useful for campaign performance analysis without needing separate lookups. Supports date-range filtering. Note: requires a Kit Pro plan.",
+  {
+    sent_after: z.string().optional()
+      .describe("Only include broadcasts sent after this date (ISO datetime)"),
+    sent_before: z.string().optional()
+      .describe("Only include broadcasts sent before this date (ISO datetime)"),
+    per_page: z.number().optional().describe("Results per page (default 500, max 1000)"),
+    after: z.string().optional().describe("Pagination cursor"),
+    include_total_count: z.boolean().optional()
+      .describe("Include total count in response (slower — only request on first page)"),
+  },
+  async (params) => {
+    try {
+      const result = await client.listBroadcastStats(params);
+      return formatResponse(result);
+    } catch (error) {
+      return formatError(error);
+    }
+  }
+);
+
+server.tool(
+  "kit_get_broadcast_link_clicks",
+  "Get per-URL click breakdown for a broadcast: each tracked link with unique click count, click-to-delivery rate, and click-to-open rate.",
+  {
+    broadcast_id: z.string().describe("The broadcast ID"),
+    per_page: z.number().optional().describe("Results per page"),
+    after: z.string().optional().describe("Pagination cursor"),
+  },
+  async ({ broadcast_id, per_page, after }) => {
+    try {
+      const result = await client.getBroadcastLinkClicks(broadcast_id, { per_page, after });
+      return formatResponse(result);
     } catch (error) {
       return formatError(error);
     }

@@ -26,6 +26,20 @@ export interface PaginatedResponse<T> {
   };
 }
 
+// POST /v4/subscribers/filter — engagement filter condition
+export interface FilterCondition {
+  type: "opens" | "clicks" | "sent" | "delivered" | "subscribed" | "tags";
+  count_greater_than?: number;
+  count_less_than?: number;
+  after?: string;   // YYYY-MM-DD
+  before?: string;  // YYYY-MM-DD
+  any?: Array<
+    | { type: "broadcasts"; ids: number[] }
+    | { type: "urls"; urls: string[]; matching: "contains" | "exact" }
+    | { type: "ids"; matching: number[] }
+  >;
+}
+
 export class KitClient {
   private apiKey: string;
 
@@ -59,29 +73,44 @@ export class KitClient {
     return response.json() as Promise<T>;
   }
 
-  // Account
+  private buildQuery(params: object): string {
+    const searchParams = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) {
+        searchParams.append(key, String(value));
+      }
+    });
+    const q = searchParams.toString();
+    return q ? `?${q}` : "";
+  }
+
+  // ── Account ────────────────────────────────────────────────────────────────
+
   async getAccount(): Promise<any> {
     return this.request("/account");
   }
 
-  // Subscribers
+  // ── Subscribers ────────────────────────────────────────────────────────────
+
   async listSubscribers(params?: PaginationParams & {
-    status?: "active" | "inactive" | "bounced" | "complained" | "cancelled";
+    status?: "active" | "inactive" | "bounced" | "complained" | "cancelled" | "all";
+    email_address?: string;       // comma-separated for multi-lookup
     created_after?: string;
     created_before?: string;
     updated_after?: string;
     updated_before?: string;
     sort_field?: "created_at" | "updated_at";
     sort_order?: "asc" | "desc";
-  }): Promise<PaginatedResponse<any>> {
-    const searchParams = new URLSearchParams();
-    if (params) {
-      Object.entries(params).forEach(([key, value]) => {
-        if (value !== undefined) searchParams.append(key, String(value));
-      });
-    }
-    const query = searchParams.toString();
-    return this.request(`/subscribers${query ? `?${query}` : ""}`);
+    include?: string;             // comma-sep: attribution,tags,location,canceled_at
+    slim?: boolean;
+    include_total_count?: boolean;
+  }): Promise<any> {
+    return this.request(`/subscribers${this.buildQuery(params ?? {})}`);
+  }
+
+  /** Convenience: look up a subscriber by exact email address. */
+  async getSubscriberByEmail(email: string): Promise<any> {
+    return this.request(`/subscribers${this.buildQuery({ email_address: email, per_page: 1 })}`);
   }
 
   async getSubscriber(id: string): Promise<any> {
@@ -111,33 +140,66 @@ export class KitClient {
     });
   }
 
-  async getSubscriberTags(subscriberId: string): Promise<PaginatedResponse<any>> {
+  async unsubscribeSubscriber(id: string): Promise<any> {
+    return this.request(`/subscribers/${id}/unsubscribe`, {
+      method: "POST",
+    });
+  }
+
+  /**
+   * Returns opens, clicks, bounce, and last-activity stats for a subscriber.
+   * Data available from June 2025 onward only.
+   */
+  async getSubscriberStats(id: string, params?: {
+    email_sent_after?: string;   // YYYY-MM-DD
+    email_sent_before?: string;  // YYYY-MM-DD
+  }): Promise<any> {
+    return this.request(`/subscribers/${id}/stats${this.buildQuery(params ?? {})}`);
+  }
+
+  async getSubscriberTags(subscriberId: string): Promise<any> {
     return this.request(`/subscribers/${subscriberId}/tags`);
   }
 
   async addTagToSubscriber(subscriberId: string, tagId: string): Promise<any> {
-    return this.request(`/subscribers/${subscriberId}/tags`, {
+    // Kit v4 POST /tags/{id}/subscribers requires email_address — not a numeric ID.
+    // Fetch the subscriber first to get their email.
+    const sub = await this.getSubscriber(subscriberId);
+    const email = sub?.subscriber?.email_address;
+    if (!email) {
+      throw new Error(`Subscriber ${subscriberId} not found or has no email address`);
+    }
+    return this.request(`/tags/${tagId}/subscribers`, {
       method: "POST",
-      body: JSON.stringify({ tag_id: tagId }),
+      body: JSON.stringify({ email_address: email }),
     });
   }
 
   async removeTagFromSubscriber(subscriberId: string, tagId: string): Promise<void> {
-    await this.request(`/subscribers/${subscriberId}/tags/${tagId}`, {
+    await this.request(`/tags/${tagId}/subscribers/${subscriberId}`, {
       method: "DELETE",
     });
   }
 
-  // Tags
-  async listTags(params?: PaginationParams): Promise<PaginatedResponse<any>> {
-    const searchParams = new URLSearchParams();
-    if (params) {
-      Object.entries(params).forEach(([key, value]) => {
-        if (value !== undefined) searchParams.append(key, String(value));
-      });
-    }
-    const query = searchParams.toString();
-    return this.request(`/tags${query ? `?${query}` : ""}`);
+  /**
+   * Filter subscribers by engagement using AND logic across conditions.
+   * Condition types: opens, clicks, sent, delivered, subscribed, tags.
+   */
+  async filterSubscribersByEngagement(body: {
+    all: FilterCondition[];
+    per_page?: number;
+    after?: string;
+  }): Promise<any> {
+    return this.request("/subscribers/filter", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  // ── Tags ───────────────────────────────────────────────────────────────────
+
+  async listTags(params?: PaginationParams): Promise<any> {
+    return this.request(`/tags${this.buildQuery(params ?? {})}`);
   }
 
   async getTag(id: string): Promise<any> {
@@ -164,27 +226,14 @@ export class KitClient {
     });
   }
 
-  async listTagSubscribers(tagId: string, params?: PaginationParams): Promise<PaginatedResponse<any>> {
-    const searchParams = new URLSearchParams();
-    if (params) {
-      Object.entries(params).forEach(([key, value]) => {
-        if (value !== undefined) searchParams.append(key, String(value));
-      });
-    }
-    const query = searchParams.toString();
-    return this.request(`/tags/${tagId}/subscribers${query ? `?${query}` : ""}`);
+  async listTagSubscribers(tagId: string, params?: PaginationParams & { slim?: boolean }): Promise<any> {
+    return this.request(`/tags/${tagId}/subscribers${this.buildQuery(params ?? {})}`);
   }
 
-  // Sequences
-  async listSequences(params?: PaginationParams): Promise<PaginatedResponse<any>> {
-    const searchParams = new URLSearchParams();
-    if (params) {
-      Object.entries(params).forEach(([key, value]) => {
-        if (value !== undefined) searchParams.append(key, String(value));
-      });
-    }
-    const query = searchParams.toString();
-    return this.request(`/sequences${query ? `?${query}` : ""}`);
+  // ── Sequences ──────────────────────────────────────────────────────────────
+
+  async listSequences(params?: PaginationParams): Promise<any> {
+    return this.request(`/sequences${this.buildQuery(params ?? {})}`);
   }
 
   async getSequence(id: string): Promise<any> {
@@ -198,20 +247,37 @@ export class KitClient {
     });
   }
 
-  // Broadcasts
-  async listBroadcasts(params?: PaginationParams): Promise<PaginatedResponse<any>> {
-    const searchParams = new URLSearchParams();
-    if (params) {
-      Object.entries(params).forEach(([key, value]) => {
-        if (value !== undefined) searchParams.append(key, String(value));
-      });
-    }
-    const query = searchParams.toString();
-    return this.request(`/broadcasts${query ? `?${query}` : ""}`);
+  // ── Broadcasts ─────────────────────────────────────────────────────────────
+
+  async listBroadcasts(params?: PaginationParams & { slim?: boolean }): Promise<any> {
+    return this.request(`/broadcasts${this.buildQuery(params ?? {})}`);
   }
 
   async getBroadcast(id: string): Promise<any> {
     return this.request(`/broadcasts/${id}`);
+  }
+
+  /** Stats (recipients, open rate, click rate, etc.) for a single broadcast. */
+  async getBroadcastStats(id: string): Promise<any> {
+    return this.request(`/broadcasts/${id}/stats`);
+  }
+
+  /**
+   * Stats for all broadcasts. Includes subject + send_at on each row.
+   * Supports date-range filtering via sent_after / sent_before.
+   * Note: requires a Pro plan.
+   */
+  async listBroadcastStats(params?: PaginationParams & {
+    sent_after?: string;
+    sent_before?: string;
+    include_total_count?: boolean;
+  }): Promise<any> {
+    return this.request(`/broadcasts/stats${this.buildQuery(params ?? {})}`);
+  }
+
+  /** Per-URL click breakdown for a broadcast (url, unique_clicks, CTR, CTOR). */
+  async getBroadcastLinkClicks(id: string, params?: PaginationParams): Promise<any> {
+    return this.request(`/broadcasts/${id}/clicks${this.buildQuery(params ?? {})}`);
   }
 
   async createBroadcast(data: {
@@ -256,16 +322,12 @@ export class KitClient {
     });
   }
 
-  // Forms
-  async listForms(params?: PaginationParams & { status?: "active" | "archived" | "trashed" | "all" }): Promise<PaginatedResponse<any>> {
-    const searchParams = new URLSearchParams();
-    if (params) {
-      Object.entries(params).forEach(([key, value]) => {
-        if (value !== undefined) searchParams.append(key, String(value));
-      });
-    }
-    const query = searchParams.toString();
-    return this.request(`/forms${query ? `?${query}` : ""}`);
+  // ── Forms ──────────────────────────────────────────────────────────────────
+
+  async listForms(params?: PaginationParams & {
+    status?: "active" | "archived" | "trashed" | "all";
+  }): Promise<any> {
+    return this.request(`/forms${this.buildQuery(params ?? {})}`);
   }
 
   async getForm(id: string): Promise<any> {
@@ -282,21 +344,16 @@ export class KitClient {
     });
   }
 
-  // Custom Fields
-  async listCustomFields(): Promise<PaginatedResponse<any>> {
+  // ── Custom Fields ──────────────────────────────────────────────────────────
+
+  async listCustomFields(): Promise<any> {
     return this.request("/custom_fields");
   }
 
-  // Webhooks
-  async listWebhooks(params?: PaginationParams): Promise<PaginatedResponse<any>> {
-    const searchParams = new URLSearchParams();
-    if (params) {
-      Object.entries(params).forEach(([key, value]) => {
-        if (value !== undefined) searchParams.append(key, String(value));
-      });
-    }
-    const query = searchParams.toString();
-    return this.request(`/webhooks${query ? `?${query}` : ""}`);
+  // ── Webhooks ───────────────────────────────────────────────────────────────
+
+  async listWebhooks(params?: PaginationParams): Promise<any> {
+    return this.request(`/webhooks${this.buildQuery(params ?? {})}`);
   }
 
   async createWebhook(data: {
